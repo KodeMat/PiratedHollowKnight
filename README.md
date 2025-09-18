@@ -1,9 +1,8 @@
-# PiratedHollowKnight v0.1.0
+# PiratedHollowKnight
 
 A powerful command-line launcher and save manager for Hollow Knight on Windows.
 
-**Author:** Karel Matthieu L. Logro (Kode / KodeMat)  
-**Version:** 0.1.0
+**Author:** Karel Matthieu L. Logro (Kode / KodeMat)
 
 ---
 
