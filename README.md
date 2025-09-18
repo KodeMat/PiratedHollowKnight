@@ -96,7 +96,7 @@ The setup is automatic. Simply run the launcher with a Google Drive target for t
 - `--log-level="level"`: (Optional) Set logging verbosity. Options: `info`, `warn`, `error`, `quiet`. Defaults to `quiet`.
 - `--auth`: (Optional) Force the `rclone` authentication wizard to run, even if a configuration already exists. Useful for re-authenticating or adding new remotes.
 - `--sync-on-quit`: (Optional) A global flag to enable syncing on quit for backup targets.
-- `--download-retries=N`: (Optional) Number of times to retry the download if the hash check fails.
+- `--download-retries[=N]`: (Optional) Number of times to retry the download. Defaults to 1. If the flag is provided without a number (e.g., `--download-retries`), it will retry indefinitely.
 
 ---
 

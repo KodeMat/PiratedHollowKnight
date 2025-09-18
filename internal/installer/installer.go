@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/schollz/progressbar/v3"
 )
@@ -36,7 +37,6 @@ type Extractor struct {
 	Type string
 }
 
-// EnsureDependencies checks for the game and rclone, installing them if needed.
 func EnsureDependencies(cfg *config.Config) error {
 	log.Log.Info("--- Checking Dependencies ---")
 	if err := ensureHollowKnightInstalled(cfg); err != nil {
@@ -62,13 +62,104 @@ func ensureHollowKnightInstalled(cfg *config.Config) error {
 	return nil
 }
 
+func downloadAndExtractHollowKnight(cfg *config.Config) error {
+	tempDownloadDir, _ := os.MkdirTemp("", "hk-download-*")
+	defer os.RemoveAll(tempDownloadDir)
+	tempExtractDir, _ := os.MkdirTemp("", "hk-extract-*")
+	defer os.RemoveAll(tempExtractDir)
+
+	finalURL, err := getFinalURLFromHTMX("https://buzzheavier.com/ibozyrc7vpjq/download")
+	if err != nil {
+		return err
+	}
+	filename, err := getDirectDownloadInfo(finalURL)
+	if err != nil {
+		return err
+	}
+	downloadedFilePath := filepath.Join(tempDownloadDir, filename)
+
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		log.Log.Warn("\n🚨 Interrupt received during download. Cleaning up...")
+		os.Remove(downloadedFilePath)
+		os.Exit(1)
+	}()
+	defer signal.Stop(c)
+
+	var lastErr error
+	isInfinite := cfg.DownloadRetries == -1
+
+	// This loop handles both finite and infinite retries.
+	for i := 1; ; i++ {
+		if isInfinite {
+			log.Log.Info("Download attempt %d (retrying indefinitely)...", i)
+		} else {
+			totalAttempts := int(cfg.DownloadRetries) + 1
+			if i > totalAttempts {
+				break
+			}
+			log.Log.Info("Download attempt %d of %d...", i, totalAttempts)
+		}
+
+		// Perform download and verification
+		if err := downloadFileWithProgress(finalURL, downloadedFilePath); err != nil {
+			lastErr = err
+			log.Log.Warn("Attempt failed (download): %v", err)
+			_ = os.Remove(downloadedFilePath) // Clean up partial file
+		} else if err := verifySHA1(downloadedFilePath, expectedSHA1); err != nil {
+			lastErr = err
+			log.Log.Warn("Attempt failed (verification): %v", err)
+			_ = os.Remove(downloadedFilePath)
+		} else {
+			// Success!
+			lastErr = nil
+			break
+		}
+
+		// If infinite, wait before retrying to avoid hammering the server.
+		if isInfinite {
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	if lastErr != nil {
+		return fmt.Errorf("all download attempts failed. Last error: %w", lastErr)
+	}
+
+	extractor, _ := findExtractor()
+	var cmd *exec.Cmd
+	if extractor.Type == "winrar" {
+		cmd = exec.Command(extractor.Path, "x", downloadedFilePath, tempExtractDir)
+	} else {
+		cmd = exec.Command(extractor.Path, "x", downloadedFilePath, fmt.Sprintf("-o%s", tempExtractDir))
+	}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("extraction failed: %w\n%s", err, string(output))
+	}
+
+	entries, _ := os.ReadDir(tempExtractDir)
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "Hollow Knight v") {
+			oldPath := filepath.Join(tempExtractDir, entry.Name())
+			if err := os.Rename(oldPath, cfg.HollowKnightInstallPath); err != nil {
+				return err
+			}
+			log.Log.Info("✅ Game installed to %s", cfg.HollowKnightInstallPath)
+			return nil
+		}
+	}
+	return fmt.Errorf("could not find game folder in archive")
+}
+
+// --- Rest of installer.go remains unchanged ---
 func ensureRcloneInstalled(cfg *config.Config) error {
 	gdriveTargets := getGdriveTargets(cfg)
 	if len(gdriveTargets) == 0 {
 		log.Log.Info("No GDrive targets specified, skipping rclone check.")
 		return nil
 	}
-
 	log.Log.Info("GDrive target(s) found, checking rclone setup...")
 	if _, err := exec.LookPath("rclone"); err != nil {
 		exePath, _ := os.Executable()
@@ -83,17 +174,14 @@ func ensureRcloneInstalled(cfg *config.Config) error {
 	} else {
 		log.Log.Info("✅ rclone found in PATH.")
 	}
-
 	if cfg.ForceRcloneAuth {
 		log.Log.Warn("`--auth` flag detected. Forcing rclone configuration wizard...")
 		return backup.RunRcloneConfigWizard(cfg)
 	}
-
 	if !util.PathExists(cfg.RcloneConfigPath) {
 		log.Log.Warn("Rclone config not found at '%s'. Starting one-time setup...", cfg.RcloneConfigPath)
 		return backup.RunRcloneConfigWizard(cfg)
 	}
-
 	remotes, err := backup.GetConfiguredRemotes(cfg)
 	if err != nil {
 		return fmt.Errorf("could not verify rclone configuration: %w", err)
@@ -105,12 +193,10 @@ func ensureRcloneInstalled(cfg *config.Config) error {
 			allRemotesFound = false
 		}
 	}
-
 	if !allRemotesFound {
 		log.Log.Warn("One or more required remotes are missing. Starting configuration wizard...")
 		return backup.RunRcloneConfigWizard(cfg)
 	}
-
 	log.Log.Info("✅ Rclone configuration verified.")
 	return nil
 }
@@ -217,8 +303,6 @@ func downloadFileWithProgress(url, destPath string) error {
 	return nil
 }
 
-// getFinalURLFromHTMX simulates the htmx request to get the final download URL.
-// This function is updated to include all headers from a real browser request.
 func getFinalURLFromHTMX(htmxURL string) (string, error) {
 	log.Log.Info("Simulating htmx request to get redirect URL...")
 	client := &http.Client{
@@ -230,8 +314,6 @@ func getFinalURLFromHTMX(htmxURL string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create htmx request: %w", err)
 	}
-
-	// Set all headers to mimic a real browser request
 	req.Header.Set("accept", "*/*")
 	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
 	req.Header.Set("accept-language", "en-US,en;q=0.9")
@@ -246,22 +328,17 @@ func getFinalURLFromHTMX(htmxURL string) (string, error) {
 	req.Header.Set("sec-fetch-mode", "cors")
 	req.Header.Set("sec-fetch-site", "same-origin")
 	req.Header.Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 OPR/121.0.0.0")
-
-	// In Go's net/http, the ':authority:' pseudo-header is controlled by the `Host` field on the request.
 	req.Host = "buzzheavier.com"
-
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("htmx request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
 	redirectURL := resp.Header.Get("HX-Redirect")
 	if redirectURL == "" {
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("server response did not contain HX-Redirect header. Status: %s, Body: %s", resp.Status, string(bodyBytes))
 	}
-
 	log.Log.Info("✅ Successfully found HX-Redirect header: %s", redirectURL)
 	return redirectURL, nil
 }
@@ -287,73 +364,4 @@ func getDirectDownloadInfo(finalURL string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("could not determine filename")
-}
-
-func downloadAndExtractHollowKnight(cfg *config.Config) error {
-	tempDownloadDir, _ := os.MkdirTemp("", "hk-download-*")
-	defer os.RemoveAll(tempDownloadDir)
-	tempExtractDir, _ := os.MkdirTemp("", "hk-extract-*")
-	defer os.RemoveAll(tempExtractDir)
-
-	finalURL, err := getFinalURLFromHTMX("https://buzzheavier.com/ibozyrc7vpjq/download")
-	if err != nil {
-		return err
-	}
-	filename, err := getDirectDownloadInfo(finalURL)
-	if err != nil {
-		return err
-	}
-	downloadedFilePath := filepath.Join(tempDownloadDir, filename)
-
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		log.Log.Warn("\n🚨 Interrupt received during download. Cleaning up...")
-		os.Remove(downloadedFilePath)
-		os.Exit(1)
-	}()
-	defer signal.Stop(c)
-
-	var lastErr error
-	for i := 0; i < cfg.DownloadRetries+1; i++ {
-		log.Log.Info("Download attempt %d...", i+1)
-		if err := downloadFileWithProgress(finalURL, downloadedFilePath); err != nil {
-			lastErr = err
-			continue
-		}
-		if err := verifySHA1(downloadedFilePath, expectedSHA1); err != nil {
-			lastErr = err
-			continue
-		}
-		lastErr = nil
-		break
-	}
-	if lastErr != nil {
-		return lastErr
-	}
-
-	extractor, _ := findExtractor()
-	var cmd *exec.Cmd
-	if extractor.Type == "winrar" {
-		cmd = exec.Command(extractor.Path, "x", downloadedFilePath, tempExtractDir)
-	} else {
-		cmd = exec.Command(extractor.Path, "x", downloadedFilePath, fmt.Sprintf("-o%s", tempExtractDir))
-	}
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("extraction failed: %w\n%s", err, string(output))
-	}
-
-	entries, _ := os.ReadDir(tempExtractDir)
-	for _, entry := range entries {
-		if entry.IsDir() && strings.HasPrefix(entry.Name(), "Hollow Knight v") {
-			oldPath := filepath.Join(tempExtractDir, entry.Name())
-			if err := os.Rename(oldPath, cfg.HollowKnightInstallPath); err != nil {
-				return err
-			}
-			log.Log.Info("✅ Game installed to %s", cfg.HollowKnightInstallPath)
-			return nil
-		}
-	}
-	return fmt.Errorf("could not find game folder in archive")
 }

@@ -11,12 +11,44 @@ import (
 	"time"
 )
 
+// optionalInt is a custom flag type that can be treated as a boolean (if no value)
+// or an integer (if a value is provided). A value of -1 represents "infinite".
+type optionalInt int
+
+func (i *optionalInt) String() string {
+	if *i == -1 {
+		return "infinite"
+	}
+	return strconv.Itoa(int(*i))
+}
+
+func (i *optionalInt) Set(value string) error {
+	// This is the case where the flag is present but has no value, e.g., "--download-retries"
+	if value == "true" {
+		*i = -1 // Use -1 as the sentinel for infinite
+		return nil
+	}
+	// This is the case where a value is provided, e.g., "--download-retries=5"
+	val, err := strconv.Atoi(value)
+	if err != nil {
+		return err
+	}
+	*i = optionalInt(val)
+	return nil
+}
+
+// IsBoolFlag makes the flag parser treat this as a boolean flag
+// if it's present on the command line without an explicit value.
+func (i *optionalInt) IsBoolFlag() bool {
+	return true
+}
+
 // Config holds all application settings loaded from flags.
 type Config struct {
 	HollowKnightInstallPath string
 	SyncTargets             []SyncTarget
 	SyncOnQuit              bool
-	DownloadRetries         int
+	DownloadRetries         optionalInt
 	RcloneConfigPath        string
 	ForceRcloneAuth         bool
 	LogLevel                string
@@ -52,25 +84,25 @@ func (s *stringSlice) Set(value string) error {
 
 // Load parses command-line flags and arguments to build the application configuration.
 func Load() (*Config, error) {
-	// Use a new flag set to avoid interfering with tests or other packages in the future.
 	fs := flag.NewFlagSet("main", flag.ExitOnError)
 
 	cfg := &Config{}
 	var targets stringSlice
 	var installPath string
 
+	// Set a default value for DownloadRetries before parsing.
+	cfg.DownloadRetries = 1
+
 	fs.Var(&targets, "target", "Master/backup save location. Repeatable. Format: \"path|interval|quit_sync\"")
 	fs.BoolVar(&cfg.SyncOnQuit, "sync-on-quit", false, "Globally enable sync on game exit for targets without a 'quit' option.")
 	fs.StringVar(&installPath, "install-path", "", "Path to the Hollow Knight game installation directory. Defaults to user's Documents/Hollow Knight.")
-	fs.IntVar(&cfg.DownloadRetries, "download-retries", 1, "Number of times to retry the game download if the hash check fails.")
+	fs.Var(&cfg.DownloadRetries, "download-retries", "Number of times to retry download. If flag is present without a value, retries are infinite.")
 	fs.StringVar(&cfg.RcloneConfigPath, "config-path", "", "Path to the rclone.conf file. Defaults to 'rclone.conf' in the executable's directory.")
 	fs.BoolVar(&cfg.ForceRcloneAuth, "auth", false, "Force the rclone authentication wizard to run for online targets.")
 	fs.StringVar(&cfg.LogLevel, "log-level", "quiet", "Set logging verbosity. Options: info, warn, error, quiet.")
 
-	// Parse flags from os.Args, excluding the program name.
 	fs.Parse(os.Args[1:])
 
-	// Post-process install path
 	if installPath == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
@@ -81,7 +113,6 @@ func Load() (*Config, error) {
 		cfg.HollowKnightInstallPath = installPath
 	}
 
-	// Post-process rclone config path
 	if cfg.RcloneConfigPath == "" {
 		exePath, err := os.Executable()
 		if err != nil {
@@ -90,10 +121,9 @@ func Load() (*Config, error) {
 		cfg.RcloneConfigPath = filepath.Join(filepath.Dir(exePath), "rclone.conf")
 	}
 
-	// Parse all target strings
 	for i, t := range targets {
 		target := parseTargetString(t)
-		if i == 0 { // First target is always the primary
+		if i == 0 {
 			target.Interval = -1
 			yes := true
 			target.SyncOnQuit = &yes
@@ -101,7 +131,6 @@ func Load() (*Config, error) {
 		cfg.SyncTargets = append(cfg.SyncTargets, target)
 	}
 
-	// Check for 'clean' command from non-flag arguments
 	if fs.NArg() > 0 && fs.Arg(0) == "clean" {
 		cfg.RunClean = true
 	}
@@ -109,7 +138,6 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
-// parseTargetString breaks down a raw target string into a structured SyncTarget.
 func parseTargetString(raw string) SyncTarget {
 	target := SyncTarget{Original: raw}
 	parts := strings.Split(raw, "|")
