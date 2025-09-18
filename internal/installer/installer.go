@@ -217,21 +217,51 @@ func downloadFileWithProgress(url, destPath string) error {
 	return nil
 }
 
+// getFinalURLFromHTMX simulates the htmx request to get the final download URL.
+// This function is updated to include all headers from a real browser request.
 func getFinalURLFromHTMX(htmxURL string) (string, error) {
 	log.Log.Info("Simulating htmx request to get redirect URL...")
-	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequest("GET", htmxURL, nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-	req.Header.Set("Hx-Request", "true")
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequest("GET", htmxURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create htmx request: %w", err)
+	}
+
+	// Set all headers to mimic a real browser request
+	req.Header.Set("accept", "*/*")
+	req.Header.Set("accept-encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("accept-language", "en-US,en;q=0.9")
+	req.Header.Set("hx-current-url", "https://buzzheavier.com/ibozyrc7vpjq")
+	req.Header.Set("hx-request", "true")
+	req.Header.Set("priority", "u=1, i")
+	req.Header.Set("referer", "https://buzzheavier.com/ibozyrc7vpjq")
+	req.Header.Set("sec-ch-ua", `"Opera GX";v="121", "Chromium";v="137", "Not/A)Brand";v="24"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+	req.Header.Set("sec-fetch-dest", "empty")
+	req.Header.Set("sec-fetch-mode", "cors")
+	req.Header.Set("sec-fetch-site", "same-origin")
+	req.Header.Set("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36 OPR/121.0.0.0")
+
+	// In Go's net/http, the ':authority:' pseudo-header is controlled by the `Host` field on the request.
+	req.Host = "buzzheavier.com"
+
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("htmx request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
 	redirectURL := resp.Header.Get("HX-Redirect")
 	if redirectURL == "" {
-		return "", fmt.Errorf("no HX-Redirect header found")
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("server response did not contain HX-Redirect header. Status: %s, Body: %s", resp.Status, string(bodyBytes))
 	}
+
 	log.Log.Info("✅ Successfully found HX-Redirect header: %s", redirectURL)
 	return redirectURL, nil
 }
