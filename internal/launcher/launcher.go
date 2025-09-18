@@ -18,7 +18,7 @@ import (
 
 // LaunchGame handles the primary logic of preparing the environment and running the game.
 func LaunchGame(cfg *config.Config) error {
-	hollowKnightExe := filepath.Join(cfg.HollowKnightInstallPath, "hollow_knight.exe")
+	hollowKnightExe := filepath.Join(cfg.HollowKnightInstallPath, "Hollow Knight.exe")
 	if !util.PathExists(hollowKnightExe) {
 		return fmt.Errorf("executable not found at %s", hollowKnightExe)
 	}
