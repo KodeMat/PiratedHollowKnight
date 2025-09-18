@@ -1,0 +1,55 @@
+# /.github/workflows/release.yml
+
+name: Go Release Build
+
+# This workflow is triggered whenever a new release is created on GitHub.
+on:
+  release:
+    types: [created]
+
+# Define the jobs that will run as part of the workflow.
+jobs:
+  build-release:
+    # The job needs permission to write to the release to upload the asset.
+    permissions:
+      contents: write
+      
+    # This job will run on the latest version of Windows, as the app is Windows-specific.
+    runs-on: windows-latest
+
+    # Environment variables available to all steps in this job.
+    env:
+      EXECUTABLE_NAME: PiratedHollowKnight.exe
+
+    steps:
+      # Step 1: Check out the repository's code so the workflow can access it.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up the Go environment with the specific version from your go.mod file.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.1' # Matches your go.mod file
+
+      # Step 3: Build the application for production.
+      # -ldflags="-s -w" strips debug information to reduce the file size.
+      # -o sets the output name defined in the environment variable.
+      - name: Build Go application
+        run: go build -ldflags="-s -w" -o ${{ env.EXECUTABLE_NAME }} ./cmd/pirated-hollow-knight
+
+      # Step 4: Upload the compiled executable to the release that triggered this workflow.
+      # The GITHUB_TOKEN is automatically created and provided by GitHub Actions.
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # This is the URL for uploading assets to the release that triggered the workflow.
+          upload_url: ${{ github.event.release.upload_url }}
+          # The path to the file to upload.
+          asset_path: ./${{ env.EXECUTABLE_NAME }}
+          # The name the file will have in the release downloads section.
+          asset_name: ${{ env.EXECUTABLE_NAME }}
+          # The MIME type of the file.
+          asset_content_type: application/octet-stream
