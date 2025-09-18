@@ -1,0 +1,10 @@
+# / .gitattributes
+
+# Set the default behavior for all text files to handle line endings automatically.
+* text=auto
+
+# Explicitly force Go source files to always use LF line endings.
+# This is the standard for the Go ecosystem and silences warnings.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
