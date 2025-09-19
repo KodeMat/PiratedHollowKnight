@@ -3,17 +3,43 @@ package util
 
 import (
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-// PathExists checks if a file or directory exists.
+// GetDirLastModTime finds the most recent modification time of any file in a directory tree.
+func GetDirLastModTime(dirPath string) (time.Time, error) {
+	var latestModTime time.Time
+	err := filepath.WalkDir(dirPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			if info.ModTime().After(latestModTime) {
+				latestModTime = info.ModTime()
+			}
+		}
+		return nil
+	})
+	// If the directory doesn't exist, WalkDir returns an error. We treat this
+	// as a zero time, which is not a fatal error for our logic.
+	if err != nil && !os.IsNotExist(err) {
+		return time.Time{}, err
+	}
+	return latestModTime, nil
+}
+
+// (Rest of file is unchanged)
 func PathExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
 }
-
-// CopyDir recursively copies a directory from src to dst.
 func CopyDir(src, dst string) error {
 	srcInfo, err := os.Stat(src)
 	if err != nil {
@@ -41,7 +67,6 @@ func CopyDir(src, dst string) error {
 	}
 	return nil
 }
-
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

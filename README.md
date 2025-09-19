@@ -6,6 +6,16 @@ A powerful command-line launcher and save manager for Hollow Knight on Windows.
 
 ---
 
+## Download
+
+You can download the latest version of the application directly from the GitHub Releases page.
+
+[**>> Download Latest Release (PiratedHollowKnight.exe) <<**](https://github.com/YourUsername/YourRepoName/releases/latest/download/PiratedHollowKnight.exe)
+
+Alternatively, you can [view all releases](https://github.com/YourUsername/YourRepoName/releases/latest) to see the full change history and download source code.
+
+---
+
 ## Disclaimer: Piracy and Support for Developers
 
 **This software facilitates the download of a pirated copy of Hollow Knight. The use of this tool for this purpose is not encouraged.**
@@ -15,7 +25,6 @@ Hollow Knight is a critically acclaimed masterpiece, crafted by a small and dedi
 You can buy the game on [Steam](https://store.steampowered.com/app/367520/Hollow_Knight/), [GOG](https://www.gog.com/game/hollow_knight), or other official platforms.
 
 ---
-
 ## A Note on AI Collaboration
 
 This project represents a modern development paradigm, pairing human architectural vision with AI-driven implementation. I provided the core logic, architectural design, and iterative feedback that shaped the final product.
@@ -32,19 +41,21 @@ At its core, it solves the problem of running multiple, simultaneous instances o
 
 ## Core Features
 
-### 1. Automatic Game Installation
+### 1. Dynamic Save Synchronization Modes
+
+The launcher intelligently adapts its behavior based on the targets you provide, eliminating the old "first-target-is-master" rule.
+
+-   **Latest-Source-Wins Mode:** When you provide a mix of local and cloud targets, the launcher checks the modification time of every save location. It automatically identifies the most recently played save file and uses it as the master source for the game session, ensuring you always continue from your latest progress, no matter where it was saved.
+-   **Online-Only Mode:** If you provide *only* cloud-based targets (e.g., `gdrive:`), the launcher runs in a direct mode. It compares your local saves with the cloud saves, syncs down the newest version if necessary, and then runs the game directly on your main save files without creating a temporary environment. After you quit, it syncs your progress back up to the cloud.
+
+### 2. Automatic Game Installation
 - If the game is not found, the launcher will automatically download it from `buzzheavier.com`.
 - **Integrity Guarantee:** A SHA-1 hash (`edf6dbde9a65a6304e096b61b0b2226a6e8a2416`) verifies the download, protecting against corruption.
 - **Resilient Downloads:** Can be configured to automatically retry failed downloads.
 
-### 2. Multi-Instance Save Isolation
+### 3. Multi-Instance Save Isolation
 - **Per-Process Virtualization:** Before launching, a unique temporary directory is created for that instance.
-- **Environment Modification:** The game process starts with a modified `USERPROFILE` environment variable, transparently redirecting all save I/O to its own isolated sandbox. This ensures multiple instances can run simultaneously without any save file collisions.
-
-### 3. Advanced Save Management & Backups
-- **Live Primary Save:** The first `--target` is the master save location. The game session runs directly on these saves in an isolated environment.
-- **Live & Periodic Backups:** Subsequent `--target` locations act as backups, syncing automatically from the live session.
-- **Native Google Drive Versioning:** Uses `rclone copy` to leverage Google Drive's native file versioning, creating a new version on every upload instead of overwriting.
+- **Environment Modification:** The game process starts with a modified `USERPROFILE` environment variable, transparently redirecting all save I/O to its own isolated sandbox. This ensures multiple instances can run simultaneously without any save file collisions. (Note: This mode is used when at least one local target is specified).
 
 ### 4. Automated & Portable Dependency Management
 - **Self-Contained Rclone:** If `rclone.exe` is not found, the launcher automatically downloads it.
@@ -67,18 +78,16 @@ The setup is automatic. Simply run the launcher with a Google Drive target for t
 .\PiratedHollowKnight.exe --target="gdrive:YourFolderID" --log-level=info
 ```
 
-### Basic Launch
-```sh
+### Basic Launch```sh
 # Launch the game without save management (no output on success)
 .\PiratedHollowKnight.exe
 ```
 
 ### Advanced Launch with Cloud Backups
 ```sh
-# Use a local master save, with a live backup to Google Drive and
-# a periodic 600-second (10-minute) backup to another local folder.
-# Use --log-level=info to see detailed operation status.
-.\PiratedHollowKnight.exe --target="D:\HollowKnightSaves" --target="gdrive:YourFolderID|0|true" --target="E:\Backups|600" --log-level=info
+# Use a local master save, with a live backup to Google Drive.
+# The launcher will automatically detect which save is newer and start from there.
+.\PiratedHollowKnight.exe --target="D:\HollowKnightSaves" --target="gdrive:YourFolderID|0|true" --log-level=info
 ```
 
 ---

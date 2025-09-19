@@ -2,6 +2,8 @@
 package backup
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,9 +13,56 @@ import (
 	"pirated-hollow-knight/internal/log"
 	"pirated-hollow-knight/internal/util"
 	"strings"
+	"time"
 )
 
-// getRclonePath finds the path to the rclone executable, prioritizing local.
+// rcloneLsjsonItem represents a single item in the output of `rclone lsjson`.
+type rcloneLsjsonItem struct {
+	Path    string
+	Name    string
+	Size    int64
+	ModTime time.Time
+}
+
+// GetCloudDirLastModTime fetches the most recent modification time from a cloud directory.
+func GetCloudDirLastModTime(cfg *config.Config, target config.SyncTarget) (time.Time, error) {
+	rclonePath, err := getRclonePath()
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	remotePath := fmt.Sprintf("%s:%s", target.RemoteName, target.Path)
+	cmdArgs := []string{"--config", cfg.RcloneConfigPath, "lsjson", remotePath}
+	cmd := exec.Command(rclonePath, cmdArgs...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		// Specific check for directory not found, which is not a fatal error.
+		if strings.Contains(stderr.String(), "directory not found") {
+			return time.Time{}, nil // Return zero time, indicating it doesn't exist yet.
+		}
+		return time.Time{}, fmt.Errorf("rclone lsjson failed for %s: %w\nOutput: %s", remotePath, err, stderr.String())
+	}
+
+	var items []rcloneLsjsonItem
+	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil {
+		return time.Time{}, fmt.Errorf("failed to parse rclone lsjson output: %w", err)
+	}
+
+	var latestModTime time.Time
+	for _, item := range items {
+		if item.ModTime.After(latestModTime) {
+			latestModTime = item.ModTime
+		}
+	}
+
+	return latestModTime, nil
+}
+
+// (Rest of file is unchanged)
 func getRclonePath() (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
@@ -25,39 +74,30 @@ func getRclonePath() (string, error) {
 	}
 	path, err := exec.LookPath("rclone")
 	if err != nil {
-		return "", fmt.Errorf("rclone not found locally or in PATH. Dependency check failed")
+		return "", fmt.Errorf("rclone not found locally or in PATH")
 	}
 	return path, nil
 }
-
-// RunRcloneCommand executes an rclone command with standardized arguments.
 func RunRcloneCommand(cfg *config.Config, args ...string) error {
 	rclonePath, err := getRclonePath()
 	if err != nil {
 		return err
 	}
-
 	isQuiet := cfg.LogLevel == "quiet"
-
-	// Prepend the managed config path and other standard flags.
 	cmdArgs := []string{"--config", cfg.RcloneConfigPath, "--retries", "5"}
 	if !isQuiet {
 		cmdArgs = append(cmdArgs, "--progress")
 	}
 	cmdArgs = append(cmdArgs, args...)
-
 	cmd := exec.Command(rclonePath, cmdArgs...)
 	log.Log.Info("Executing: %s", cmd.String())
-
 	if isQuiet {
-		// Suppress rclone's output completely in quiet mode.
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 	} else {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	}
-
 	err = cmd.Run()
 	if err != nil {
 		return fmt.Errorf("rclone command failed: %w", err)
@@ -65,8 +105,6 @@ func RunRcloneCommand(cfg *config.Config, args ...string) error {
 	log.Log.Info("rclone command completed successfully.")
 	return nil
 }
-
-// RunRcloneConfigWizard launches the interactive rclone setup process.
 func RunRcloneConfigWizard(cfg *config.Config) error {
 	rclonePath, err := getRclonePath()
 	if err != nil {
@@ -80,8 +118,6 @@ func RunRcloneConfigWizard(cfg *config.Config) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
-
-// GetConfiguredRemotes runs `rclone listremotes` and returns a map of them.
 func GetConfiguredRemotes(cfg *config.Config) (map[string]bool, error) {
 	rclonePath, err := getRclonePath()
 	if err != nil {

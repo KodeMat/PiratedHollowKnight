@@ -14,35 +14,135 @@ import (
 	"pirated-hollow-knight/internal/util"
 	"strings"
 	"syscall"
+	"time"
 )
 
-// LaunchGame handles the primary logic of preparing the environment and running the game.
+// LaunchGame is the main entry point for the launcher logic.
+// It determines the run mode and executes the appropriate workflow.
 func LaunchGame(cfg *config.Config) error {
 	hollowKnightExe := filepath.Join(cfg.HollowKnightInstallPath, "Hollow Knight.exe")
 	if !util.PathExists(hollowKnightExe) {
 		return fmt.Errorf("executable not found at %s", hollowKnightExe)
 	}
 
+	// No targets: simple launch and exit.
 	if len(cfg.SyncTargets) == 0 {
 		return launchFireAndForget(cfg, hollowKnightExe)
 	}
 
-	return launchIsolated(cfg, hollowKnightExe)
+	// Determine if all targets are cloud-based.
+	allCloud := true
+	for _, t := range cfg.SyncTargets {
+		if t.Type != config.Gdrive {
+			allCloud = false
+			break
+		}
+	}
+
+	if allCloud {
+		return runOnlineOnlyMode(cfg, hollowKnightExe)
+	}
+
+	return runIsolatedMode(cfg, hollowKnightExe)
 }
 
-func launchFireAndForget(cfg *config.Config, exePath string) error {
-	log.Log.Info("No save targets specified. Launching game and detaching.")
+// runOnlineOnlyMode manages saves directly in the user's real save directory.
+func runOnlineOnlyMode(cfg *config.Config, exePath string) error {
+	log.Log.Info("--- Running in Online-Only Mode ---")
+	localSavePath := cfg.UserSavePath
+
+	// Pre-launch: Sync down from the newest cloud source if necessary.
+	localModTime, _ := util.GetDirLastModTime(localSavePath)
+	var newestCloudTarget *config.SyncTarget
+	var newestCloudTime time.Time
+
+	for i, target := range cfg.SyncTargets {
+		cloudTime, err := backup.GetCloudDirLastModTime(cfg, target)
+		if err != nil {
+			log.Log.Warn("Could not get mod time for cloud target '%s': %v", target.Original, err)
+			continue
+		}
+		if cloudTime.After(newestCloudTime) {
+			newestCloudTime = cloudTime
+			newestCloudTarget = &cfg.SyncTargets[i]
+		}
+	}
+
+	if newestCloudTarget != nil && newestCloudTime.After(localModTime) {
+		log.Log.Info("Cloud target '%s' is newer than local saves. Syncing down...", newestCloudTarget.Original)
+		remotePath := fmt.Sprintf("%s:%s", newestCloudTarget.RemoteName, newestCloudTarget.Path)
+		if err := backup.RunRcloneCommand(cfg, "sync", remotePath, localSavePath); err != nil {
+			return fmt.Errorf("failed to sync down from cloud: %w", err)
+		}
+	} else {
+		log.Log.Info("Local saves are up-to-date. Skipping pre-launch sync.")
+	}
+
+	// Launch game directly.
 	cmd := exec.Command(exePath)
 	cmd.Dir = cfg.HollowKnightInstallPath
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to launch Hollow Knight: %w", err)
 	}
-	log.Log.Info("✅ Game launched successfully. This program will now exit.")
+	log.Log.Info("🚀 Game launched directly. Process ID: %d. Monitoring...", cmd.Process.Pid)
+
+	waitErr := cmd.Wait()
+	log.Log.Info("✅ Game process has terminated. Exit code: %v", waitErr)
+
+	// Post-launch: Sync back up to all targets that require it.
+	log.Log.Info("--- Syncing saves back to cloud targets ---")
+	for _, target := range cfg.SyncTargets {
+		doSync := cfg.SyncOnQuit
+		if target.SyncOnQuit != nil {
+			doSync = *target.SyncOnQuit
+		}
+		if doSync {
+			log.Log.Info("Syncing to '%s' on quit...", target.Original)
+			if err := backup.CopyToMaster(cfg, localSavePath, target); err != nil {
+				log.Log.Error("Failed syncing back to '%s': %v", target.Original, err)
+			} else {
+				log.Log.Info("✅ Successfully synced back to '%s'", target.Original)
+			}
+		}
+	}
+
 	return nil
 }
 
-func launchIsolated(cfg *config.Config, exePath string) error {
-	instanceRoot, instanceSaveDir, err := setupInstanceEnvironment(cfg)
+// runIsolatedMode finds the latest source and uses a virtualized environment.
+func runIsolatedMode(cfg *config.Config, exePath string) error {
+	log.Log.Info("--- Running in Isolated Mode ---")
+
+	// Pre-launch: Find the target with the most recent modification time.
+	var latestSourceTarget config.SyncTarget
+	var latestModTime time.Time
+	isFirst := true
+
+	for _, target := range cfg.SyncTargets {
+		var currentModTime time.Time
+		var err error
+		if target.Type == config.Local {
+			currentModTime, err = util.GetDirLastModTime(target.Path)
+		} else {
+			currentModTime, err = backup.GetCloudDirLastModTime(cfg, target)
+		}
+
+		if err != nil {
+			log.Log.Warn("Could not get mod time for target '%s': %v", target.Original, err)
+			continue
+		}
+
+		if isFirst || currentModTime.After(latestModTime) {
+			latestModTime = currentModTime
+			latestSourceTarget = target
+			isFirst = false
+		}
+	}
+
+	log.Log.Info("Latest save source identified: '%s'", latestSourceTarget.Original)
+
+	// Setup and run in isolated environment.
+	instanceRoot, instanceSaveDir, err := setupInstanceEnvironment(cfg, latestSourceTarget)
 	if err != nil {
 		return fmt.Errorf("failed to set up isolated game environment: %w", err)
 	}
@@ -55,13 +155,10 @@ func launchIsolated(cfg *config.Config, exePath string) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to launch Hollow Knight: %w", err)
 	}
-
-	log.Log.Info("🚀 Launching %s...", exePath)
-	log.Log.Info("✅ Game launched successfully in isolated environment. Process ID: %d. Monitoring...", cmd.Process.Pid)
+	log.Log.Info("🚀 Game launched in isolated environment. Process ID: %d. Monitoring...", cmd.Process.Pid)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
 	backup.StartBackgroundSync(ctx, cfg, instanceSaveDir)
 
 	c := make(chan os.Signal, 1)
@@ -80,7 +177,7 @@ func launchIsolated(cfg *config.Config, exePath string) error {
 	return nil
 }
 
-func setupInstanceEnvironment(cfg *config.Config) (string, string, error) {
+func setupInstanceEnvironment(cfg *config.Config, sourceTarget config.SyncTarget) (string, string, error) {
 	log.Log.Info("--- Setting up isolated game instance ---")
 	instanceRoot, err := os.MkdirTemp("", "hk-instance-root-*")
 	if err != nil {
@@ -92,15 +189,25 @@ func setupInstanceEnvironment(cfg *config.Config) (string, string, error) {
 		return "", "", err
 	}
 	log.Log.Info("Created instance save directory: %s", instanceSaveDir)
-
-	primaryTarget := cfg.SyncTargets[0]
-	log.Log.Info("Populating instance from primary target: %s", primaryTarget.Path)
-	if err := copyFromMaster(cfg, primaryTarget, instanceSaveDir); err != nil {
+	log.Log.Info("Populating instance from latest source: %s", sourceTarget.Original)
+	if err := copyFromMaster(cfg, sourceTarget, instanceSaveDir); err != nil {
 		os.RemoveAll(instanceRoot)
 		return "", "", err
 	}
 	log.Log.Info("✅ Instance environment ready.")
 	return instanceRoot, instanceSaveDir, nil
+}
+
+// (Other helper functions remain largely the same, but are included for completeness)
+func launchFireAndForget(cfg *config.Config, exePath string) error {
+	log.Log.Info("No save targets specified. Launching game and detaching.")
+	cmd := exec.Command(exePath)
+	cmd.Dir = cfg.HollowKnightInstallPath
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to launch Hollow Knight: %w", err)
+	}
+	log.Log.Info("✅ Game launched successfully. This program will now exit.")
+	return nil
 }
 
 func copySavesBack(cfg *config.Config, instanceSaveDir string) {
@@ -115,9 +222,9 @@ func copySavesBack(cfg *config.Config, instanceSaveDir string) {
 			continue
 		}
 		if err := backup.CopyToMaster(cfg, instanceSaveDir, target); err != nil {
-			log.Log.Error("Failed syncing back to '%s': %v", target.Path, err)
+			log.Log.Error("Failed syncing back to '%s': %v", target.Original, err)
 		} else {
-			log.Log.Info("✅ Successfully synced back to '%s'", target.Path)
+			log.Log.Info("✅ Successfully synced back to '%s'", target.Original)
 		}
 	}
 }

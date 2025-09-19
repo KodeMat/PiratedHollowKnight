@@ -11,8 +11,7 @@ import (
 	"time"
 )
 
-// optionalInt is a custom flag type that can be treated as a boolean (if no value)
-// or an integer (if a value is provided). A value of -1 represents "infinite".
+// (optionalInt custom flag type remains the same)
 type optionalInt int
 
 func (i *optionalInt) String() string {
@@ -21,14 +20,11 @@ func (i *optionalInt) String() string {
 	}
 	return strconv.Itoa(int(*i))
 }
-
 func (i *optionalInt) Set(value string) error {
-	// This is the case where the flag is present but has no value, e.g., "--download-retries"
 	if value == "true" {
-		*i = -1 // Use -1 as the sentinel for infinite
+		*i = -1
 		return nil
 	}
-	// This is the case where a value is provided, e.g., "--download-retries=5"
 	val, err := strconv.Atoi(value)
 	if err != nil {
 		return err
@@ -36,16 +32,12 @@ func (i *optionalInt) Set(value string) error {
 	*i = optionalInt(val)
 	return nil
 }
+func (i *optionalInt) IsBoolFlag() bool { return true }
 
-// IsBoolFlag makes the flag parser treat this as a boolean flag
-// if it's present on the command line without an explicit value.
-func (i *optionalInt) IsBoolFlag() bool {
-	return true
-}
-
-// Config holds all application settings loaded from flags.
+// Config holds all application settings.
 type Config struct {
 	HollowKnightInstallPath string
+	UserSavePath            string // New: Path to the user's real save directory.
 	SyncTargets             []SyncTarget
 	SyncOnQuit              bool
 	DownloadRetries         optionalInt
@@ -55,7 +47,6 @@ type Config struct {
 	RunClean                bool
 }
 
-// SyncType defines whether a target is local or on Google Drive.
 type SyncType int
 
 const (
@@ -63,7 +54,6 @@ const (
 	Gdrive
 )
 
-// SyncTarget holds the parsed information for a single save target.
 type SyncTarget struct {
 	Type       SyncType
 	Path       string
@@ -73,24 +63,16 @@ type SyncTarget struct {
 	Original   string
 }
 
-// stringSlice is a custom flag type for repeatable string flags.
 type stringSlice []string
 
-func (s *stringSlice) String() string { return strings.Join(*s, ", ") }
-func (s *stringSlice) Set(value string) error {
-	*s = append(*s, value)
-	return nil
-}
+func (s *stringSlice) String() string         { return strings.Join(*s, ", ") }
+func (s *stringSlice) Set(value string) error { *s = append(*s, value); return nil }
 
-// Load parses command-line flags and arguments to build the application configuration.
 func Load() (*Config, error) {
 	fs := flag.NewFlagSet("main", flag.ExitOnError)
-
 	cfg := &Config{}
 	var targets stringSlice
 	var installPath string
-
-	// Set a default value for DownloadRetries before parsing.
 	cfg.DownloadRetries = 1
 
 	fs.Var(&targets, "target", "Master/backup save location. Repeatable. Format: \"path|interval|quit_sync\"")
@@ -100,14 +82,15 @@ func Load() (*Config, error) {
 	fs.StringVar(&cfg.RcloneConfigPath, "config-path", "", "Path to the rclone.conf file. Defaults to 'rclone.conf' in the executable's directory.")
 	fs.BoolVar(&cfg.ForceRcloneAuth, "auth", false, "Force the rclone authentication wizard to run for online targets.")
 	fs.StringVar(&cfg.LogLevel, "log-level", "quiet", "Set logging verbosity. Options: info, warn, error, quiet.")
-
 	fs.Parse(os.Args[1:])
 
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not determine user home directory: %w", err)
+	}
+	cfg.UserSavePath = filepath.Join(homeDir, "AppData", "LocalLow", "Team Cherry", "Hollow Knight")
+
 	if installPath == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("could not determine user home directory: %w", err)
-		}
 		cfg.HollowKnightInstallPath = filepath.Join(homeDir, "Documents", "Hollow Knight")
 	} else {
 		cfg.HollowKnightInstallPath = installPath
@@ -142,7 +125,6 @@ func parseTargetString(raw string) SyncTarget {
 	target := SyncTarget{Original: raw}
 	parts := strings.Split(raw, "|")
 	pathPart := parts[0]
-
 	if remoteParts := strings.SplitN(pathPart, ":", 2); len(remoteParts) == 2 && remoteParts[0] != "" && len(remoteParts[0]) < len(pathPart) && !strings.Contains(remoteParts[0], "\\") {
 		target.Type = Gdrive
 		target.RemoteName = remoteParts[0]
@@ -151,7 +133,6 @@ func parseTargetString(raw string) SyncTarget {
 		target.Type = Local
 		target.Path = pathPart
 	}
-
 	if len(parts) > 1 && parts[1] != "" {
 		intervalSec, err := strconv.Atoi(parts[1])
 		if err == nil {
@@ -160,13 +141,11 @@ func parseTargetString(raw string) SyncTarget {
 	} else {
 		target.Interval = 0
 	}
-
 	if len(parts) > 2 && parts[2] != "" {
 		syncOnQuit, err := strconv.ParseBool(parts[2])
 		if err == nil {
 			target.SyncOnQuit = &syncOnQuit
 		}
 	}
-
 	return target
 }
