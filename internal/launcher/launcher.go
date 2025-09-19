@@ -18,19 +18,16 @@ import (
 )
 
 // LaunchGame is the main entry point for the launcher logic.
-// It determines the run mode and executes the appropriate workflow.
 func LaunchGame(cfg *config.Config) error {
 	hollowKnightExe := filepath.Join(cfg.HollowKnightInstallPath, "Hollow Knight.exe")
 	if !util.PathExists(hollowKnightExe) {
 		return fmt.Errorf("executable not found at %s", hollowKnightExe)
 	}
 
-	// No targets: simple launch and exit.
 	if len(cfg.SyncTargets) == 0 {
 		return launchFireAndForget(cfg, hollowKnightExe)
 	}
 
-	// Determine if all targets are cloud-based.
 	allCloud := true
 	for _, t := range cfg.SyncTargets {
 		if t.Type != config.Gdrive {
@@ -46,12 +43,10 @@ func LaunchGame(cfg *config.Config) error {
 	return runIsolatedMode(cfg, hollowKnightExe)
 }
 
-// runOnlineOnlyMode manages saves directly in the user's real save directory.
 func runOnlineOnlyMode(cfg *config.Config, exePath string) error {
 	log.Log.Info("--- Running in Online-Only Mode ---")
 	localSavePath := cfg.UserSavePath
 
-	// Pre-launch: Sync down from the newest cloud source if necessary.
 	localModTime, _ := util.GetDirLastModTime(localSavePath)
 	var newestCloudTarget *config.SyncTarget
 	var newestCloudTime time.Time
@@ -78,7 +73,6 @@ func runOnlineOnlyMode(cfg *config.Config, exePath string) error {
 		log.Log.Info("Local saves are up-to-date. Skipping pre-launch sync.")
 	}
 
-	// Launch game directly.
 	cmd := exec.Command(exePath)
 	cmd.Dir = cfg.HollowKnightInstallPath
 	if err := cmd.Start(); err != nil {
@@ -89,7 +83,6 @@ func runOnlineOnlyMode(cfg *config.Config, exePath string) error {
 	waitErr := cmd.Wait()
 	log.Log.Info("✅ Game process has terminated. Exit code: %v", waitErr)
 
-	// Post-launch: Sync back up to all targets that require it.
 	log.Log.Info("--- Syncing saves back to cloud targets ---")
 	for _, target := range cfg.SyncTargets {
 		doSync := cfg.SyncOnQuit
@@ -109,11 +102,9 @@ func runOnlineOnlyMode(cfg *config.Config, exePath string) error {
 	return nil
 }
 
-// runIsolatedMode finds the latest source and uses a virtualized environment.
 func runIsolatedMode(cfg *config.Config, exePath string) error {
 	log.Log.Info("--- Running in Isolated Mode ---")
 
-	// Pre-launch: Find the target with the most recent modification time.
 	var latestSourceTarget config.SyncTarget
 	var latestModTime time.Time
 	isFirst := true
@@ -141,7 +132,6 @@ func runIsolatedMode(cfg *config.Config, exePath string) error {
 
 	log.Log.Info("Latest save source identified: '%s'", latestSourceTarget.Original)
 
-	// Setup and run in isolated environment.
 	instanceRoot, instanceSaveDir, err := setupInstanceEnvironment(cfg, latestSourceTarget)
 	if err != nil {
 		return fmt.Errorf("failed to set up isolated game environment: %w", err)
@@ -177,28 +167,77 @@ func runIsolatedMode(cfg *config.Config, exePath string) error {
 	return nil
 }
 
+// setupInstanceEnvironment now creates a more complete virtual AppData structure.
 func setupInstanceEnvironment(cfg *config.Config, sourceTarget config.SyncTarget) (string, string, error) {
 	log.Log.Info("--- Setting up isolated game instance ---")
 	instanceRoot, err := os.MkdirTemp("", "hk-instance-root-*")
 	if err != nil {
 		return "", "", err
 	}
-	instanceSaveDir := filepath.Join(instanceRoot, "AppData", "LocalLow", "Team Cherry", "Hollow Knight")
+
+	// Create a more complete virtual AppData structure.
+	appDataDir := filepath.Join(instanceRoot, "AppData")
+	_ = os.Mkdir(filepath.Join(appDataDir, "Local"), 0755)
+	_ = os.Mkdir(filepath.Join(appDataDir, "Roaming"), 0755)
+
+	// The actual save directory for Hollow Knight.
+	instanceSaveDir := filepath.Join(appDataDir, "LocalLow", "Team Cherry", "Hollow Knight")
 	if err := os.MkdirAll(instanceSaveDir, 0755); err != nil {
 		os.RemoveAll(instanceRoot)
 		return "", "", err
 	}
-	log.Log.Info("Created instance save directory: %s", instanceSaveDir)
+	log.Log.Info("Created virtual AppData structure in: %s", instanceRoot)
+
 	log.Log.Info("Populating instance from latest source: %s", sourceTarget.Original)
 	if err := copyFromMaster(cfg, sourceTarget, instanceSaveDir); err != nil {
 		os.RemoveAll(instanceRoot)
 		return "", "", err
 	}
+
 	log.Log.Info("✅ Instance environment ready.")
 	return instanceRoot, instanceSaveDir, nil
 }
 
-// (Other helper functions remain largely the same, but are included for completeness)
+// getModifiedEnv now overrides all relevant AppData variables for a robust sandbox.
+func getModifiedEnv(instanceRoot string) []string {
+	originalEnv := os.Environ()
+	newEnv := make([]string, 0, len(originalEnv))
+
+	// Define the new paths for our sandbox.
+	virtualAppData := filepath.Join(instanceRoot, "AppData")
+	virtualLocalAppData := filepath.Join(virtualAppData, "Local")
+	virtualRoamingAppData := filepath.Join(virtualAppData, "Roaming")
+
+	// Filter out the real paths to prevent them from being used.
+	varsToOverride := map[string]bool{
+		"USERPROFILE":  true,
+		"APPDATA":      true,
+		"LOCALAPPDATA": true,
+	}
+
+	for _, e := range originalEnv {
+		// Split string on first '='
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) != 2 {
+			newEnv = append(newEnv, e) // Keep malformed variables
+			continue
+		}
+		varName := strings.ToUpper(parts[0])
+		if !varsToOverride[varName] {
+			newEnv = append(newEnv, e)
+		}
+	}
+
+	// Append our new, virtualized paths.
+	newEnv = append(newEnv, fmt.Sprintf("USERPROFILE=%s", instanceRoot))
+	newEnv = append(newEnv, fmt.Sprintf("APPDATA=%s", virtualRoamingAppData))
+	newEnv = append(newEnv, fmt.Sprintf("LOCALAPPDATA=%s", virtualLocalAppData))
+
+	return newEnv
+}
+
+// --- Other helper functions (unchanged) ---
+
 func launchFireAndForget(cfg *config.Config, exePath string) error {
 	log.Log.Info("No save targets specified. Launching game and detaching.")
 	cmd := exec.Command(exePath)
@@ -236,17 +275,6 @@ func cleanupInstanceEnvironment(instanceRoot string) {
 		log.Log.Warn("Failed to delete instance root directory: %v", err)
 	}
 	log.Log.Info("✅ Teardown complete.")
-}
-
-func getModifiedEnv(instanceRoot string) []string {
-	env := os.Environ()
-	var newEnv []string
-	for _, e := range env {
-		if !strings.HasPrefix(strings.ToUpper(e), "USERPROFILE=") {
-			newEnv = append(newEnv, e)
-		}
-	}
-	return append(newEnv, "USERPROFILE="+instanceRoot)
 }
 
 func copyFromMaster(cfg *config.Config, master config.SyncTarget, instanceDir string) error {
