@@ -37,7 +37,7 @@ func (i *optionalInt) IsBoolFlag() bool { return true }
 // Config holds all application settings.
 type Config struct {
 	HollowKnightInstallPath string
-	UserSavePath            string // New: Path to the user's real save directory.
+	UserSavePath            string
 	SyncTargets             []SyncTarget
 	SyncOnQuit              bool
 	DownloadRetries         optionalInt
@@ -106,8 +106,9 @@ func Load() (*Config, error) {
 
 	for i, t := range targets {
 		target := parseTargetString(t)
+		// The first target is no longer special and is treated like any other.
+		// We retain the logic to set sync on quit to true by default for it, as a convenience.
 		if i == 0 {
-			target.Interval = -1
 			yes := true
 			target.SyncOnQuit = &yes
 		}
@@ -125,7 +126,12 @@ func parseTargetString(raw string) SyncTarget {
 	target := SyncTarget{Original: raw}
 	parts := strings.Split(raw, "|")
 	pathPart := parts[0]
-	if remoteParts := strings.SplitN(pathPart, ":", 2); len(remoteParts) == 2 && remoteParts[0] != "" && len(remoteParts[0]) < len(pathPart) && !strings.Contains(remoteParts[0], "\\") {
+
+	remoteParts := strings.SplitN(pathPart, ":", 2)
+
+	// This is the updated logic. It now checks that the remote name is longer than one character,
+	// which correctly excludes Windows drive letters like "C:".
+	if len(remoteParts) == 2 && remoteParts[0] != "" && !strings.Contains(remoteParts[0], "\\") && len(remoteParts[0]) > 1 {
 		target.Type = Gdrive
 		target.RemoteName = remoteParts[0]
 		target.Path = remoteParts[1]
@@ -133,19 +139,24 @@ func parseTargetString(raw string) SyncTarget {
 		target.Type = Local
 		target.Path = pathPart
 	}
+
 	if len(parts) > 1 && parts[1] != "" {
 		intervalSec, err := strconv.Atoi(parts[1])
 		if err == nil {
 			target.Interval = time.Duration(intervalSec) * time.Second
 		}
 	} else {
+		// Interval of 0 means live sync (watcher mode). A negative interval means it's the primary target.
+		// We set it to 0 and let the launcher logic handle the primary target case.
 		target.Interval = 0
 	}
+
 	if len(parts) > 2 && parts[2] != "" {
 		syncOnQuit, err := strconv.ParseBool(parts[2])
 		if err == nil {
 			target.SyncOnQuit = &syncOnQuit
 		}
 	}
+
 	return target
 }
