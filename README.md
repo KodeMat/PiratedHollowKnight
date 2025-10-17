@@ -1,5 +1,7 @@
 # PiratedHollowKnight
 
+[![Go CI](https://github.com/KodeMat/PiratedHollowKnight/actions/workflows/ci.yml/badge.svg)](https://github.com/KodeMat/PiratedHollowKnight/actions/workflows/ci.yml)
+
 A powerful command-line launcher and save manager for Hollow Knight on Windows.
 
 **Author:** Karel Matthieu L. Logro (Kode / KodeMat)
@@ -10,9 +12,9 @@ A powerful command-line launcher and save manager for Hollow Knight on Windows.
 
 You can download the latest version of the application directly from the GitHub Releases page.
 
-[**>> Download Latest Release (PiratedHollowKnight.exe) <<**](https://github.com/YourUsername/YourRepoName/releases/latest/download/PiratedHollowKnight.exe)
+[**>> Download Latest Release (PiratedHollowKnight.exe) <<**](https://github.com/KodeMat/PiratedHollowKnight/releases/latest/download/PiratedHollowKnight.exe)
 
-Alternatively, you can [view all releases](https://github.com/YourUsername/YourRepoName/releases/latest) to see the full change history and download source code.
+Alternatively, you can [view all releases](https://github.com/KodeMat/PiratedHollowKnight/releases/latest) to see the full change history and download source code.
 
 ---
 

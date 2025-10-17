@@ -1,0 +1,42 @@
+# /.github/workflows/ci.yml
+
+name: Go CI
+
+# This workflow triggers on pushes and pull requests to the main branch.
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+# Define the jobs that will run as part of the workflow.
+jobs:
+  build-and-test:
+    # The job needs read permissions to access the code.
+    permissions:
+      contents: read
+
+    # This job will run on the latest version of Windows.
+    runs-on: windows-latest
+
+    steps:
+      # Step 1: Check out the repository's code.
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2: Set up the Go environment, automatically detecting the version
+      # from the go.mod file and enabling dependency caching.
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # Step 3: Build the application to verify it compiles.
+      # The './...' pattern ensures all packages are built.
+      - name: Build
+        run: go build -v ./...
+
+      # Step 4: Run all tests in the repository.
+      - name: Test
+        run: go test -v ./...
