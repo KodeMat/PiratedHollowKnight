@@ -41,21 +41,22 @@ At its core, it solves the problem of running multiple, simultaneous instances o
 
 ## Core Features
 
-### 1. Dynamic Save Synchronization Modes
+### 1. Hybrid Save Synchronization
 
-The launcher intelligently adapts its behavior based on the targets you provide, eliminating the old "first-target-is-master" rule.
+The launcher uses a robust, hybrid model to protect your save data, combining the safety of transactional syncs with the convenience of live backups.
 
--   **Latest-Source-Wins Mode:** When you provide a mix of local and cloud targets, the launcher checks the modification time of every save location. It automatically identifies the most recently played save file and uses it as the master source for the game session, ensuring you always continue from your latest progress, no matter where it was saved.
--   **Online-Only Mode:** If you provide *only* cloud-based targets (e.g., `gdrive:`), the launcher runs in a direct mode. It compares your local saves with the cloud saves, syncs down the newest version if necessary, and then runs the game directly on your main save files without creating a temporary environment. After you quit, it syncs your progress back up to the cloud.
+-   **Transactional Startup/Shutdown:** Before the game launches, the launcher identifies the most recently updated save file (local or cloud) and syncs it to the game's save directory. This "Latest-Source-Wins" logic ensures you always pick up where you left off. After you exit the game, your session's progress is atomically synced back to the original source.
+-   **Live In-Game Backups:** While you play, the launcher continuously backs up your saves in the background. You can configure each backup target independently:
+    -   **Periodic Backups:** Set a time-based interval (e.g., `|300` for every 5 minutes) to have your saves automatically backed up.
+    -   **Watcher-Based Backups:** Set `interval=0` (e.g., `|0`) for instant backups. The launcher will watch for file changes and copy them to the destination the moment the game saves.
 
 ### 2. Automatic Game Installation
 - If the game is not found, the launcher will automatically download it from `buzzheavier.com`.
 - **Integrity Guarantee:** A SHA-1 hash (`edf6dbde9a65a6304e096b61b0b2226a6e8a2416`) verifies the download, protecting against corruption.
-- **Resilient Downloads:** Can be configured to automatically retry failed downloads.
+- **Resilient Downloads:** Can be configured to automatically retry failed downloads, with support for graceful cancellation (Ctrl+C).
 
-### 3. Multi-Instance Save Isolation
-- **Per-Process Virtualization:** Before launching, a unique temporary directory is created for that instance.
-- **Environment Modification:** The game process starts with a modified `USERPROFILE` environment variable, transparently redirecting all save I/O to its own isolated sandbox. This ensures multiple instances can run simultaneously without any save file collisions. (Note: This mode is used when at least one local target is specified).
+### 3. Robust Instance Locking
+- **PID-Aware Locking:** The launcher prevents multiple instances from running against the same configuration and potentially corrupting save data. It uses a modern PID-based lock that automatically cleans up stale lock files from crashed or improperly closed sessions.
 
 ### 4. Automated & Portable Dependency Management
 - **Self-Contained Rclone:** If `rclone.exe` is not found, the launcher automatically downloads it.
@@ -99,7 +100,7 @@ The setup is automatic. Simply run the launcher with a Google Drive target for t
 - `clean`: Deletes the downloaded game and rclone executable.
 
 **Flags:**
-- `--target="path[|interval|quit_sync]"`: (Repeatable) Specifies a save location. The first target is always the primary.
+- `--target="path[|interval|quit_sync]"`: (Repeatable) Specifies a save location.
 - `--install-path="path"`: (Optional) The directory where Hollow Knight should be installed.
 - `--config-path="path"`: (Optional) Path to the `rclone.conf` file. Defaults to `rclone.conf` in the executable's directory.
 - `--log-level="level"`: (Optional) Set logging verbosity. Options: `info`, `warn`, `error`, `quiet`. Defaults to `quiet`.

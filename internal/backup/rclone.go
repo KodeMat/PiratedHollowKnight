@@ -25,7 +25,7 @@ type rcloneLsjsonItem struct {
 }
 
 // GetCloudDirLastModTime fetches the most recent modification time from a cloud directory.
-func GetCloudDirLastModTime(cfg *config.Config, target config.SyncTarget) (time.Time, error) {
+func GetCloudDirLastModTime(ctx context.Context, cfg *config.Config, target config.SyncTarget) (time.Time, error) {
 	rclonePath, err := getRclonePath()
 	if err != nil {
 		return time.Time{}, err
@@ -33,7 +33,7 @@ func GetCloudDirLastModTime(cfg *config.Config, target config.SyncTarget) (time.
 
 	remotePath := fmt.Sprintf("%s:%s", target.RemoteName, target.Path)
 	cmdArgs := []string{"--config", cfg.RcloneConfigPath, "lsjson", remotePath}
-	cmd := exec.Command(rclonePath, cmdArgs...)
+	cmd := exec.CommandContext(ctx, rclonePath, cmdArgs...)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -78,7 +78,7 @@ func getRclonePath() (string, error) {
 	}
 	return path, nil
 }
-func RunRcloneCommand(cfg *config.Config, args ...string) error {
+func RunRcloneCommand(ctx context.Context, cfg *config.Config, args ...string) error {
 	rclonePath, err := getRclonePath()
 	if err != nil {
 		return err
@@ -89,7 +89,7 @@ func RunRcloneCommand(cfg *config.Config, args ...string) error {
 		cmdArgs = append(cmdArgs, "--progress")
 	}
 	cmdArgs = append(cmdArgs, args...)
-	cmd := exec.Command(rclonePath, cmdArgs...)
+	cmd := exec.CommandContext(ctx, rclonePath, cmdArgs...)
 	log.Log.Info("Executing: %s", cmd.String())
 	if isQuiet {
 		cmd.Stdout = io.Discard

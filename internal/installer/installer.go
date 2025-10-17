@@ -4,6 +4,7 @@ package installer
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -13,7 +14,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"pirated-hollow-knight/internal/backup"
 	"pirated-hollow-knight/internal/config"
@@ -21,7 +21,6 @@ import (
 	"pirated-hollow-knight/internal/util"
 	"runtime"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/schollz/progressbar/v3"
@@ -37,56 +36,48 @@ type Extractor struct {
 	Type string
 }
 
-func EnsureDependencies(cfg *config.Config) error {
+func EnsureDependencies(ctx context.Context, cfg *config.Config) error {
 	log.Log.Info("--- Checking Dependencies ---")
-	if err := ensureHollowKnightInstalled(cfg); err != nil {
+	if err := ensureHollowKnightInstalled(ctx, cfg); err != nil {
 		return err
 	}
-	if err := ensureRcloneInstalled(cfg); err != nil {
+	if err := ensureRcloneInstalled(ctx, cfg); err != nil {
 		return err
 	}
 	log.Log.Info("--- All dependencies are satisfied ---")
 	return nil
 }
 
-func ensureHollowKnightInstalled(cfg *config.Config) error {
+func ensureHollowKnightInstalled(ctx context.Context, cfg *config.Config) error {
 	if util.PathExists(cfg.HollowKnightInstallPath) {
 		log.Log.Info("✅ Hollow Knight installation found at: %s", cfg.HollowKnightInstallPath)
 		return nil
 	}
 	log.Log.Warn("Hollow Knight installation not found. Starting download process...")
-	if err := downloadAndExtractHollowKnight(cfg); err != nil {
+	if err := downloadAndExtractHollowKnight(ctx, cfg); err != nil {
 		return fmt.Errorf("failed to install Hollow Knight: %w", err)
 	}
 	log.Log.Info("✅ Hollow Knight installed successfully.")
 	return nil
 }
 
-func downloadAndExtractHollowKnight(cfg *config.Config) error {
+func downloadAndExtractHollowKnight(ctx context.Context, cfg *config.Config) error {
 	tempDownloadDir, _ := os.MkdirTemp("", "hk-download-*")
 	defer os.RemoveAll(tempDownloadDir)
 	tempExtractDir, _ := os.MkdirTemp("", "hk-extract-*")
 	defer os.RemoveAll(tempExtractDir)
 
-	finalURL, err := getFinalURLFromHTMX("https://buzzheavier.com/ibozyrc7vpjq/download")
+	finalURL, err := getFinalURLFromHTMX(ctx, "https://buzzheavier.com/ibozyrc7vpjq/download")
 	if err != nil {
 		return err
 	}
-	filename, err := getDirectDownloadInfo(finalURL)
+	filename, err := getDirectDownloadInfo(ctx, finalURL)
 	if err != nil {
 		return err
 	}
 	downloadedFilePath := filepath.Join(tempDownloadDir, filename)
 
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		log.Log.Warn("\n🚨 Interrupt received during download. Cleaning up...")
-		os.Remove(downloadedFilePath)
-		os.Exit(1)
-	}()
-	defer signal.Stop(c)
+	// The signal handling is now managed by the root context in main().
 
 	var lastErr error
 	isInfinite := cfg.DownloadRetries == -1
@@ -104,7 +95,7 @@ func downloadAndExtractHollowKnight(cfg *config.Config) error {
 		}
 
 		// Perform download and verification
-		if err := downloadFileWithProgress(finalURL, downloadedFilePath); err != nil {
+		if err := downloadFileWithProgress(ctx, finalURL, downloadedFilePath); err != nil {
 			lastErr = err
 			log.Log.Warn("Attempt failed (download): %v", err)
 			_ = os.Remove(downloadedFilePath) // Clean up partial file
@@ -154,7 +145,7 @@ func downloadAndExtractHollowKnight(cfg *config.Config) error {
 }
 
 // --- Rest of installer.go remains unchanged ---
-func ensureRcloneInstalled(cfg *config.Config) error {
+func ensureRcloneInstalled(ctx context.Context, cfg *config.Config) error {
 	gdriveTargets := getGdriveTargets(cfg)
 	if len(gdriveTargets) == 0 {
 		log.Log.Info("No GDrive targets specified, skipping rclone check.")
@@ -166,7 +157,7 @@ func ensureRcloneInstalled(cfg *config.Config) error {
 		localRclonePath := filepath.Join(filepath.Dir(exePath), "rclone.exe")
 		if !util.PathExists(localRclonePath) {
 			log.Log.Warn("rclone.exe not found. Starting automatic download...")
-			if err := downloadAndExtractRclone(localRclonePath); err != nil {
+			if err := downloadAndExtractRclone(ctx, localRclonePath); err != nil {
 				return fmt.Errorf("failed to automatically install rclone: %w", err)
 			}
 			log.Log.Info("✅ rclone.exe installed successfully.")
@@ -211,32 +202,45 @@ func getGdriveTargets(cfg *config.Config) []config.SyncTarget {
 	return gdriveTargets
 }
 
-func downloadAndExtractRclone(destPath string) error {
+func downloadAndExtractRclone(ctx context.Context, destPath string) error {
 	log.Log.Info("Downloading rclone from %s...", rcloneDownloadURL)
-	resp, err := http.Get(rcloneDownloadURL)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", rcloneDownloadURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
+
 	log.Log.Info("Download complete. Extracting rclone.exe...")
 	zipReader, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		return err
 	}
+
 	for _, file := range zipReader.File {
 		if strings.HasSuffix(file.Name, "rclone.exe") {
 			rc, _ := file.Open()
 			defer rc.Close()
 			outFile, _ := os.Create(destPath)
 			defer outFile.Close()
-			io.Copy(outFile, rc)
+			_, err := io.Copy(outFile, rc)
+			if err != nil {
+				return err
+			}
 			log.Log.Info("Successfully extracted rclone.exe to %s", destPath)
 			return nil
 		}
@@ -286,31 +290,40 @@ func verifySHA1(filePath, expectedHash string) error {
 	return nil
 }
 
-func downloadFileWithProgress(url, destPath string) error {
-	req, _ := http.NewRequest("GET", url, nil)
+func downloadFileWithProgress(ctx context.Context, url, destPath string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bad status: %s", resp.Status)
 	}
+
 	f, _ := os.Create(destPath)
 	defer f.Close()
-	bar := progressbar.DefaultBytes(resp.ContentLength, filepath.Base(destPath))
-	io.Copy(io.MultiWriter(f, bar), resp.Body)
-	return nil
+
+	bar := progressbar.DefaultBytes(
+		resp.ContentLength,
+		filepath.Base(destPath),
+	)
+	_, err = io.Copy(io.MultiWriter(f, bar), resp.Body)
+	return err
 }
 
-func getFinalURLFromHTMX(htmxURL string) (string, error) {
+func getFinalURLFromHTMX(ctx context.Context, htmxURL string) (string, error) {
 	log.Log.Info("Simulating htmx request to get redirect URL...")
 	client := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
-	req, err := http.NewRequest("GET", htmxURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", htmxURL, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create htmx request: %w", err)
 	}
@@ -343,12 +356,17 @@ func getFinalURLFromHTMX(htmxURL string) (string, error) {
 	return redirectURL, nil
 }
 
-func getDirectDownloadInfo(finalURL string) (string, error) {
-	resp, err := http.Head(finalURL)
+func getDirectDownloadInfo(ctx context.Context, finalURL string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", finalURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+
 	disposition := resp.Header.Get("Content-Disposition")
 	if disposition != "" {
 		_, params, err := mime.ParseMediaType(disposition)
@@ -358,6 +376,7 @@ func getDirectDownloadInfo(finalURL string) (string, error) {
 			}
 		}
 	}
+
 	if parsedURL, err := url.Parse(finalURL); err == nil {
 		if base := filepath.Base(parsedURL.Path); base != "." && base != "/" {
 			return base, nil

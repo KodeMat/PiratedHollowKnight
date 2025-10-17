@@ -2,22 +2,23 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"pirated-hollow-knight/internal/backup"
 	"pirated-hollow-knight/internal/config"
 	"pirated-hollow-knight/internal/log"
 	"pirated-hollow-knight/internal/util"
+	"strconv"
 	"syscall"
 	"time"
 )
 
 // LaunchGame is the main entry point for the new "Transactional Swap" launcher logic.
-func LaunchGame(cfg *config.Config) error {
+func LaunchGame(ctx context.Context, cfg *config.Config) error {
 	hollowKnightExe := filepath.Join(cfg.HollowKnightInstallPath, "Hollow Knight.exe")
 	if !util.PathExists(hollowKnightExe) {
 		return fmt.Errorf("executable not found at %s", hollowKnightExe)
@@ -47,42 +48,39 @@ func LaunchGame(cfg *config.Config) error {
 	defer restoreRealSaves(backupPath, realSavePath)
 
 	// 3. Identify Latest Source
-	latestSourceTarget, err := findLatestSource(cfg)
+	latestSourceTarget, err := findLatestSource(ctx, cfg)
 	if err != nil {
 		return fmt.Errorf("could not determine latest save source: %w", err)
 	}
 	log.Log.Info("Latest save source identified: '%s'", latestSourceTarget.Original)
 
 	// 4. Swap In (Populate the real save directory)
-	if err := copyFromMaster(cfg, latestSourceTarget, realSavePath); err != nil {
+	realSaveTarget := config.SyncTarget{Type: config.Local, Path: realSavePath}
+	if err := backup.Sync(ctx, cfg, latestSourceTarget, realSaveTarget); err != nil {
 		return fmt.Errorf("failed to swap in saves from '%s': %w", latestSourceTarget.Original, err)
 	}
 	log.Log.Info("Successfully populated real save directory from latest source.")
 
 	// 5. Launch Game
-	cmd := exec.Command(hollowKnightExe)
+	cmd := exec.CommandContext(ctx, hollowKnightExe)
 	cmd.Dir = cfg.HollowKnightInstallPath
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to launch Hollow Knight: %w", err)
 	}
 	log.Log.Info("🚀 Game launched. Process ID: %d. Waiting for exit...", cmd.Process.Pid)
 
-	// Intercept Ctrl+C to ensure cleanup still happens
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-c
-		log.Log.Warn("\n🚨 Interrupt signal received. Terminating game process...")
-		_ = cmd.Process.Kill()
-	}()
+	// 6. Start Background Sync (if applicable)
+	go backup.StartBackgroundSync(ctx, cfg, realSavePath)
 
-	// 6. Wait for Exit
+	// The context passed to exec.CommandContext will automatically handle process termination on interrupt.
+
+	// 7. Wait for Exit
 	waitErr := cmd.Wait()
 	log.Log.Info("✅ Game process has terminated. Exit code: %v", waitErr)
 
 	// 7. Swap Out (Copy saves back to their origin)
 	log.Log.Info("Copying session saves back to '%s'...", latestSourceTarget.Original)
-	if err := backup.CopyToMaster(cfg, realSavePath, latestSourceTarget); err != nil {
+	if err := backup.Sync(ctx, cfg, realSaveTarget, latestSourceTarget); err != nil {
 		return fmt.Errorf("failed to swap out saves to '%s': %w", latestSourceTarget.Original, err)
 	}
 	log.Log.Info("✅ Save data successfully synced back.")
@@ -99,13 +97,37 @@ func acquireLock() (string, error) {
 	lockFilePath := filepath.Join(filepath.Dir(exePath), "hk.lock")
 
 	if util.PathExists(lockFilePath) {
-		return "", errors.New("lock file 'hk.lock' exists. Another instance may be running. If not, please delete the file manually")
+		pidBytes, err := os.ReadFile(lockFilePath)
+		if err != nil {
+			log.Log.Warn("Could not read existing lock file, assuming stale: %v", err)
+		} else {
+			pid, err := strconv.Atoi(string(pidBytes))
+			if err != nil {
+				log.Log.Warn("Could not parse PID from lock file, assuming stale: %v", err)
+			} else {
+				process, err := os.FindProcess(pid)
+				if err == nil {
+					// On Windows, syscall.Signal(0) is a no-op that can be used to check for process existence.
+					err = process.Signal(syscall.Signal(0))
+					if err == nil {
+						return "", fmt.Errorf("lock file found and process with PID %d is still running. Another instance appears to be active", pid)
+					}
+				}
+				log.Log.Warn("Found stale lock file for non-existent process PID %d. Removing it.", pid)
+			}
+		}
+
+		// If we're here, the lock is stale.
+		if err := os.Remove(lockFilePath); err != nil {
+			return "", fmt.Errorf("could not remove stale lock file: %w", err)
+		}
 	}
 
-	if err := os.WriteFile(lockFilePath, []byte("locked"), 0644); err != nil {
+	pid := os.Getpid()
+	if err := os.WriteFile(lockFilePath, []byte(strconv.Itoa(pid)), 0644); err != nil {
 		return "", fmt.Errorf("could not create lock file: %w", err)
 	}
-	log.Log.Info("Acquired instance lock.")
+	log.Log.Info("Acquired instance lock for PID %d.", pid)
 	return lockFilePath, nil
 }
 
@@ -151,7 +173,7 @@ func restoreRealSaves(backupPath, realSavePath string) {
 	_ = os.RemoveAll(backupPath) // Clean up the backup dir.
 }
 
-func findLatestSource(cfg *config.Config) (config.SyncTarget, error) {
+func findLatestSource(ctx context.Context, cfg *config.Config) (config.SyncTarget, error) {
 	var latestSourceTarget config.SyncTarget
 	var latestModTime time.Time
 	foundAny := false
@@ -162,7 +184,7 @@ func findLatestSource(cfg *config.Config) (config.SyncTarget, error) {
 		if target.Type == config.Local {
 			currentModTime, err = util.GetDirLastModTime(target.Path)
 		} else {
-			currentModTime, err = backup.GetCloudDirLastModTime(cfg, target)
+			currentModTime, err = backup.GetCloudDirLastModTime(ctx, cfg, target)
 		}
 
 		if err != nil {
@@ -182,28 +204,6 @@ func findLatestSource(cfg *config.Config) (config.SyncTarget, error) {
 	}
 
 	return latestSourceTarget, nil
-}
-
-func copyFromMaster(cfg *config.Config, master config.SyncTarget, destDir string) error {
-	// Ensure the destination exists and is empty
-	_ = os.RemoveAll(destDir)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return err
-	}
-
-	switch master.Type {
-	case config.Local:
-		if !util.PathExists(master.Path) {
-			log.Log.Warn("Source path '%s' doesn't exist. Starting with an empty save directory.", master.Path)
-			return nil
-		}
-		return util.CopyDir(master.Path, destDir)
-	case config.Gdrive:
-		remotePath := fmt.Sprintf("%s:%s", master.RemoteName, master.Path)
-		// Use copy here as we are populating a directory.
-		return backup.RunRcloneCommand(cfg, "copy", remotePath, destDir)
-	}
-	return fmt.Errorf("unknown master target type: %v", master.Type)
 }
 
 // --- Unchanged Functions ---

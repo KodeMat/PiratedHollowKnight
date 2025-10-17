@@ -41,6 +41,7 @@ func StartBackgroundSync(ctx context.Context, cfg *config.Config, liveInstanceSa
 
 func startPeriodicBackups(ctx context.Context, cfg *config.Config, sourceDir string, targets []config.SyncTarget) {
 	log.Log.Info("--- Starting Periodic Background Backups ---")
+	sourceTarget := config.SyncTarget{Type: config.Local, Path: sourceDir}
 	for _, target := range targets {
 		go func(t config.SyncTarget) {
 			log.Log.Info("Starting periodic backup for '%s' every %s.", t.Original, t.Interval)
@@ -50,10 +51,8 @@ func startPeriodicBackups(ctx context.Context, cfg *config.Config, sourceDir str
 				select {
 				case <-ticker.C:
 					log.Log.Info("Periodic backup triggered for '%s'...", t.Original)
-					if err := CopyToMaster(cfg, sourceDir, t); err != nil {
+					if err := Sync(ctx, cfg, sourceTarget, t); err != nil {
 						log.Log.Error("During periodic backup for '%s': %v", t.Original, err)
-					} else {
-						log.Log.Info("✅ Periodic backup for '%s' successful.", t.Original)
 					}
 				case <-ctx.Done():
 					log.Log.Info("Stopping periodic backup for '%s'.", t.Original)
@@ -88,6 +87,7 @@ func startWatcherBackups(ctx context.Context, cfg *config.Config, sourceDir stri
 	var debounceTimer *time.Timer
 	const debounceDuration = 2 * time.Second
 	var mu sync.Mutex
+	sourceTarget := config.SyncTarget{Type: config.Local, Path: sourceDir}
 
 	go func() {
 		for {
@@ -105,10 +105,8 @@ func startWatcherBackups(ctx context.Context, cfg *config.Config, sourceDir stri
 					debounceTimer = time.AfterFunc(debounceDuration, func() {
 						log.Log.Info("Debounce timer finished. Triggering backup for all watcher targets.")
 						for _, t := range targets {
-							if err := CopyToMaster(cfg, sourceDir, t); err != nil {
+							if err := Sync(ctx, cfg, sourceTarget, t); err != nil {
 								log.Log.Error("During watched backup for '%s': %v", t.Original, err)
-							} else {
-								log.Log.Info("✅ Watched backup for '%s' successful.", t.Original)
 							}
 						}
 					})
@@ -126,20 +124,35 @@ func startWatcherBackups(ctx context.Context, cfg *config.Config, sourceDir stri
 	}()
 }
 
-// CopyToMaster is a data synchronization function. It moves data from the temporary
-// instance directory to a final master/backup destination.
-func CopyToMaster(cfg *config.Config, instanceDir string, master config.SyncTarget) error {
-	switch master.Type {
-	case config.Local:
-		if util.PathExists(master.Path) {
-			if err := os.RemoveAll(master.Path); err != nil {
-				return fmt.Errorf("could not clean local destination %s: %w", master.Path, err)
+// Sync is the new centralized data synchronization function.
+func Sync(ctx context.Context, cfg *config.Config, source, destination config.SyncTarget) error {
+	sourcePath := source.Path
+	if source.Type == config.Gdrive {
+		sourcePath = fmt.Sprintf("%s:%s", source.RemoteName, source.Path)
+	}
+
+	destPath := destination.Path
+	if destination.Type == config.Gdrive {
+		destPath = fmt.Sprintf("%s:%s", destination.RemoteName, destPath)
+	}
+
+	log.Log.Info("Syncing from '%s' to '%s'...", sourcePath, destPath)
+
+	// If both are local, we can use a simple directory copy.
+	if source.Type == config.Local && destination.Type == config.Local {
+		if util.PathExists(destPath) {
+			if err := os.RemoveAll(destPath); err != nil {
+				return fmt.Errorf("could not clean local destination %s: %w", destPath, err)
 			}
 		}
-		return util.CopyDir(instanceDir, master.Path)
-	case config.Gdrive:
-		remotePath := fmt.Sprintf("%s:%s", master.RemoteName, master.Path)
-		return RunRcloneCommand(cfg, "copy", instanceDir, remotePath)
+		return util.CopyDir(sourcePath, destPath)
 	}
-	return fmt.Errorf("unknown master target type: %v", master.Type)
+
+	// Otherwise, at least one is remote, so we must use rclone.
+	err := RunRcloneCommand(ctx, cfg, "copy", sourcePath, destPath)
+	if err != nil {
+		return fmt.Errorf("rclone sync from '%s' to '%s' failed: %w", sourcePath, destPath, err)
+	}
+	log.Log.Info("✅ Sync successful.")
+	return nil
 }
