@@ -81,7 +81,8 @@ The setup is automatic. Simply run the launcher with a Google Drive target for t
 .\PiratedHollowKnight.exe --target="gdrive:YourFolderID" --log-level=info
 ```
 
-### Basic Launch```sh
+### Basic Launch
+```sh
 # Launch the game without save management (no output on success)
 .\PiratedHollowKnight.exe
 ```
